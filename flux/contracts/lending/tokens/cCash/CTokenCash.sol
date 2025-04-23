@@ -6,15 +6,15 @@ import "../cErc20Delegate/ErrorReporter.sol";
 import "../cErc20Delegate/EIP20Interface.sol";
 import "../cErc20Delegate/InterestRateModel.sol";
 import "../cErc20Delegate/ExponentialNoError.sol";
-import "./CTokenInterfacesModified.sol";
+import "./CTokenInterfacesModifiedCash.sol";
 
 /**
- * @title Ondo's Generic CToken Contract
- * @notice Abstract base for CTokens w/underlying as non-CASH tokens
- * @dev Does sanctions and KYC checks on key functions
- * @author Compound + Ondo
+ * @title Ondo's CToken Contract for CASH
+ * @notice Abstract base for CTokens w/underlying as CASH tokens
+ * @dev Does KYC checks on key functions
+ * @author Compound (Modified by Ondo Finance)
  */
-abstract contract CTokenModified is
+abstract contract CTokenCash is
   CTokenInterface,
   ExponentialNoError,
   TokenErrorReporter
@@ -27,9 +27,6 @@ abstract contract CTokenModified is
    * @param name_ EIP-20 name of this token
    * @param symbol_ EIP-20 symbol of this token
    * @param decimals_ EIP-20 decimal precision of this token
-   * @param kycRegistry_ KYC Registry contract address
-   * @param kycRequirementGroup_ KYC Requirement group to check KYC status
-   *                             against
    */
   function initialize(
     ComptrollerInterface comptroller_,
@@ -37,9 +34,7 @@ abstract contract CTokenModified is
     uint initialExchangeRateMantissa_,
     string memory name_,
     string memory symbol_,
-    uint8 decimals_,
-    address kycRegistry_,
-    uint256 kycRequirementGroup_
+    uint8 decimals_
   ) public {
     require(msg.sender == admin, "only admin may initialize the market");
     require(
@@ -72,10 +67,6 @@ abstract contract CTokenModified is
 
     // The counter starts true to prevent changing it from zero to non-zero (i.e. smaller cost/refund)
     _notEntered = true;
-
-    // Initialize KYCRegistryClient
-    _setKYCRegistry(kycRegistry_);
-    _setKYCRequirementGroup(kycRequirementGroup_);
   }
 
   /**
@@ -93,11 +84,6 @@ abstract contract CTokenModified is
     address dst,
     uint tokens
   ) internal returns (uint) {
-    /* Revert if sanctioned */
-    require(!sanctionsList.isSanctioned(spender), "Spender is sanctioned");
-    require(!sanctionsList.isSanctioned(src), "Source is sanctioned");
-    require(!sanctionsList.isSanctioned(dst), "Destination is sanctioned");
-
     /* Fail if transfer not allowed */
     uint allowed = comptroller.transferAllowed(address(this), src, dst, tokens);
     if (allowed != 0) {
@@ -341,7 +327,7 @@ abstract contract CTokenModified is
   }
 
   /**
-   * @notice Calculates the exchange rate from the underlying to the CToken
+   * @notice Calculates the exchange rate from the underlying to the cToken
    * @dev This function does not accrue interest before calculating the exchange rate
    * @return Calculated exchange rate scaled by 1e18
    */
@@ -350,7 +336,7 @@ abstract contract CTokenModified is
   }
 
   /**
-   * @notice Calculates the exchange rate from the underlying to the CToken
+   * @notice Calculates the exchange rate from the underlying to the cToken
    * @dev This function does not accrue interest before calculating the exchange rate
    * @return calculated exchange rate scaled by 1e18
    */
@@ -489,9 +475,6 @@ abstract contract CTokenModified is
    * @param mintAmount The amount of the underlying asset to supply
    */
   function mintFresh(address minter, uint mintAmount) internal {
-    /* Revert if sanctioned */
-    require(!sanctionsList.isSanctioned(minter), "Minter is sanctioned");
-
     /* Fail if mint not allowed */
     uint allowed = comptroller.mintAllowed(address(this), minter, mintAmount);
     if (allowed != 0) {
@@ -578,9 +561,6 @@ abstract contract CTokenModified is
     uint redeemTokensIn,
     uint redeemAmountIn
   ) internal {
-    /* Revert if sanctioned */
-    require(!sanctionsList.isSanctioned(redeemer), "Redeemer is sanctioned");
-
     require(
       redeemTokensIn == 0 || redeemAmountIn == 0,
       "one of redeemTokensIn or redeemAmountIn must be zero"
@@ -677,9 +657,6 @@ abstract contract CTokenModified is
    * @param borrowAmount The amount of the underlying asset to borrow
    */
   function borrowFresh(address payable borrower, uint borrowAmount) internal {
-    /* Revert if borrower not KYC'd */
-    require(_getKYCStatus(borrower), "Borrower not KYC'd");
-
     /* Fail if borrow not allowed */
     uint allowed = comptroller.borrowAllowed(
       address(this),
@@ -769,10 +746,6 @@ abstract contract CTokenModified is
     address borrower,
     uint repayAmount
   ) internal returns (uint) {
-    /* Revert if not KYC'd */
-    require(_getKYCStatus(payer), "Payer not KYC'd");
-    require(_getKYCStatus(borrower), "Borrower not KYC'd");
-
     /* Fail if repayBorrow not allowed */
     uint allowed = comptroller.repayBorrowAllowed(
       address(this),
@@ -980,7 +953,7 @@ abstract contract CTokenModified is
 
   /**
    * @notice Transfers collateral tokens (this market) to the liquidator.
-   * @dev Called only during an in-kind liquidation, or by liquidateBorrow during the liquidation of another CToken.
+   * @dev Called only during an in-kind liquidation, or by liquidateBorrow during the liquidation of another cToken.
    *  Its absolutely critical to use msg.sender as the seizer cToken and not a parameter.
    * @param seizerToken The contract seizing the collateral (i.e. borrowed cToken)
    * @param liquidator The account receiving seized collateral
@@ -993,13 +966,6 @@ abstract contract CTokenModified is
     address borrower,
     uint seizeTokens
   ) internal {
-    /* Revert if sanctioned */
-    require(
-      !sanctionsList.isSanctioned(liquidator),
-      "Liquidator is sanctioned"
-    );
-    require(!sanctionsList.isSanctioned(borrower), "Borrower is sanctioned");
-
     /* Fail if seize not allowed */
     uint allowed = comptroller.seizeAllowed(
       address(this),
@@ -1346,62 +1312,6 @@ abstract contract CTokenModified is
     emit NewMarketInterestRateModel(oldInterestRateModel, newInterestRateModel);
 
     return NO_ERROR;
-  }
-
-  /*** KYC ***/
-
-  /**
-   * @notice Update KYC group of the contract for which
-   *         accounts are checked against
-   *
-   * @param _kycRequirementGroup The new KYC requirement group
-   */
-  function setKYCRequirementGroup(uint256 _kycRequirementGroup) external {
-    require(msg.sender == admin, "Only admin can set KYC requirement group");
-    _setKYCRequirementGroup(_kycRequirementGroup);
-  }
-
-  /**
-   * @notice Sets the KYC registry requirement group for this
-   *         client to check kyc status for
-   *
-   * @param _kycRequirementGroup The new KYC group
-   */
-  function _setKYCRequirementGroup(uint256 _kycRequirementGroup) internal {
-    uint256 oldKYCLevel = kycRequirementGroup;
-    kycRequirementGroup = _kycRequirementGroup;
-    emit KYCRequirementGroupSet(oldKYCLevel, _kycRequirementGroup);
-  }
-
-  /**
-   * @notice Update KYC registry address
-   *
-   * @param _kycRegistry The new KYC registry address
-   */
-  function setKYCRegistry(address _kycRegistry) external {
-    require(msg.sender == admin, "Only admin can set KYC registry");
-    _setKYCRegistry(_kycRegistry);
-  }
-
-  /**
-   * @notice Sets the KYC registry address for this client
-   *
-   * @param _kycRegistry The new KYC registry address
-   */
-  function _setKYCRegistry(address _kycRegistry) internal {
-    require(_kycRegistry != address(0), "KYC registry cannot be zero address");
-    address oldKYCRegistry = address(kycRegistry);
-    kycRegistry = IKYCRegistry(_kycRegistry);
-    emit KYCRegistrySet(oldKYCRegistry, _kycRegistry);
-  }
-
-  /**
-   * @notice Checks whether an address has been KYC'd
-   *
-   * @param account The address to check
-   */
-  function _getKYCStatus(address account) internal view returns (bool) {
-    return kycRegistry.getKYCStatus(kycRequirementGroup, account);
   }
 
   /*** Safe Token ***/
